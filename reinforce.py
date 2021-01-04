@@ -93,6 +93,7 @@ if __name__ == '__main__':
 
 
 	plt.plot(episode_rewards)
-	plt.plot(mean_rewards)
+	plt.plot(mean_rewards) 
+	plt.show()
 
 
