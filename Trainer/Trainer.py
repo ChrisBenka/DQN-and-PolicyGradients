@@ -1,3 +1,5 @@
+import argparse
+import numpy as np
 import os
 import tensorflow as tf
 import time
@@ -6,7 +8,7 @@ from Replay import get_replay_buffer
 
 
 class Trainer:
-	def __init__(self, agent, env, visualizer, args, output_dir='./Experiments/', model_dir='./Models/'):
+	def __init__(self, agent, env, visualizer, args):
 		assert isinstance(args, dict), "Expected args to be of type dict"
 		for k, v in args:
 			setattr(self, k, v)
@@ -16,14 +18,25 @@ class Trainer:
 		self._visualizer = visualizer
 		self._replay_buffer = get_replay_buffer(args)
 
-		self._output_dir = output_dir
-		self._model_dir = model_dir
+		self._output_dir = self._output_dir
+		self._model_dir = self._model_dir
 
 		self._set_check_point(args.model_dir)
 
 		# prepare TensorBoard output
 		self.writer = tf.summary.create_file_writer(self._output_dir)
 		self.writer.set_as_default()
+
+	def env_step(self,action):
+		state, reward, done = self._env.step(action)
+		return (
+			state.astype(np.float32),
+			np.array(reward,np.float32),
+			np.array(done,np.int)
+		)
+
+	def _tf_env_step(self,action: tf.Tensor):
+		return tf.numpy_function(self.env_step, [action], [tf.float32, tf.float32, tf.uint8])
 
 	def __call_(self):
 		assert self._num_episodes is not None, "Expected _num_episodes to be defined"
@@ -42,20 +55,17 @@ class Trainer:
 					else:
 						action = self._agent.get_action(obs)
 
-					next_obs, reward, done, _ = self._env.step(action)
+					next_obs, reward, done, _ = self._tf_env_step(action)
 
 					if self._show_progress_intvl is not None and self._show_progress_intvl % episode == 0:
 						self._env.render()
 
-					if self._replay_buffer is not None:
-						self._replay_buffer.add(obs, action, next_obs, reward, done)
+					self._replay_buffer.add(obs, action, next_obs, reward, done)
 
-						if total_steps % self._agent.policy_update_interval == 0:
-							samples = self._replay_buffer.sample(self._agent.batch_size)
-							self._agent.train(samples)
-
-					elif total_steps % self._agent.policy_update_interval == 0:
-						self._agent.train()
+					if total_steps % self._agent.policy_update_interval == 0:
+						samples = self._replay_buffer.sample(self._agent.batch_size)
+						batch_obs, batch_actions, batch_rewards, batch_next_obs, batch_done = samples
+						self._agent.train(batch_obs, batch_actions, batch_rewards, batch_next_obs, batch_done)
 
 					obs = next_obs
 
@@ -99,13 +109,18 @@ class Trainer:
 			self._latest_path_ckpt = tf.train.latest_checkpoint(model_dir)
 			self._checkpoint.restore(self._latest_path_ckpt)
 
+	@staticmethod
+	def get_args(parser=None):
+		if parser is None:
+			parser = argparse.ArgumentParser(conflict_handler='resolve')
 
+		parser.add_argument('--max-episodes', type=int, default=int(1e4), help='Max number of episodes')
+		parser.add_argument('--max-eps-steps', type=int, default=500, help='Max number of steps in an episode')
+		parser.add_argument('--n_warmup_steps', type=int, default=500, help='Number of initial,exploratory actions')
+		parser.add_argument('--show_progress', type=bool, default=True, help='Show agent progress during training')
+		parser.add_argument('--show_progress_intvl', type=int, default=250, help='Interval for showing agent progress during training')
 
+		parser.add_argument('--output_dir', type=str, default='./Experiments', help='Directory for tensorboard output')
+		parser.add_argument('--model_dir', type=str, default='./Models/', help='Directory to checkpoint models')
 
-
-
-
-
-
-
-
+		return parser
