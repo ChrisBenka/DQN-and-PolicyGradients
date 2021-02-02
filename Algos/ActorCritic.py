@@ -1,22 +1,21 @@
+from typing import List
+
+import numpy as np
 import tensorflow as tf
+from PolicyGradients.Utils.EnvUtils import tf_env_step
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.optimizers import Adam
-from PolicyGradients.Utils.EnvUtils import tf_env_step
-from PolicyGradients.Algos.Reinforce import get_expected_return
-from typing import List
-import numpy as np
 
 eps = np.finfo(np.float32).eps.item()
 
 
 def run_episodestep(
-    env,
-    initial_state: tf.Tensor,
-    policy: tf.keras.Model,
-    critic: tf.Keras.Model,
-    max_steps: int
+  env,
+  initial_state: tf.Tensor,
+  policy: tf.keras.Model,
+  critic: tf.Keras.Model,
+  max_steps: int
 ) -> List[tf.Tensor]:
-
     initial_state_shape = initial_state.shape
     state = initial_state
 
@@ -38,14 +37,15 @@ def run_episodestep(
     return next_state, done, action_probs, value, next_value, rewards
 
 
-def compute_loss(action_probs: tf.Tensor, value: tf.Tensor,gamma: float
-                 next_value: tf.Tensor, reward: tf.Tensor,
-                 done: tf.Tensor) -> tf.Tensor:
-    advs = tf.stop_gradients(values - reward + tf.cast(gamma, tf.float32) *
-                             next_value * (1-done))
-    loss = -tf.math.reduce_sum(action_log_probs * advs)
-    return loss
+def compute_loss(action_probs: tf.Tensor, value: tf.Tensor, gamma: float
+    next_value: tf.Tensor
 
+, reward: tf.Tensor,
+done: tf.Tensor) -> tf.Tensor:
+advs = tf.stop_gradients(values - reward + tf.cast(gamma, tf.float32) *
+                         next_value * (1 - done))
+loss = -tf.math.reduce_sum(action_log_probs * advs)
+return loss
 
 huber_loss = tf.keras.losses.Huber(reduction=tf.keras.losses.Reduction.SUM)
 
@@ -97,14 +97,14 @@ class ActorCritic:
                                                    next_value, reward]
                 ]
 
-              actor_loss = compute_loss(action_probs, value, next_value, reward, done)
-              critic_loss = huber_loss(values,reward + tf.cast(gamma, tf.float32) * next_value)
+            actor_loss = compute_loss(action_probs, value, next_value, reward, done)
+            critic_loss = huber_loss(values, reward + tf.cast(gamma, tf.float32) * next_value)
 
-            actor_grads = tape.gradient(actor_loss,self.policy.trainable_variables)
-            critic_loss = tape2.gradient(critic_loss,self.critic.trainable_variables)
-            self.p_optim.apply_gradients(zip(loss,self.policy.trainable_variables))
-            self.c_optim.apply_gradients(zip(loss,self.policy.trainable_variables))
-            episode_reward += tf.reduce_sum(reward)
-            
-            if tf.cast(done,tf.bool):
-                return episode_reward
+        actor_grads = tape.gradient(actor_loss, self.policy.trainable_variables)
+        critic_loss = tape2.gradient(critic_loss, self.critic.trainable_variables)
+        self.p_optim.apply_gradients(zip(loss, self.policy.trainable_variables))
+        self.c_optim.apply_gradients(zip(loss, self.policy.trainable_variables))
+        episode_reward += tf.reduce_sum(reward)
+
+        if tf.cast(done, tf.bool):
+            return episode_reward
