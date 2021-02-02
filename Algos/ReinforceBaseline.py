@@ -1,120 +1,78 @@
-import tensorflow as tf
-from tensorflow.keras.layers import Dense
-from tensorflow.keras.optimizers import Adam
-from PolicyGradients.Utils.EnvUtils import tf_env_step
-from PolicyGradients.Algos.Reinforce import get_expected_return
-from typing import List
+import gym
 import numpy as np
+import tensorflow as tf
+from matplotlib import pyplot as plt
+from tensorflow.keras.optimizers import Adam
 
-eps = np.finfo(np.float32).eps.item()
+from PolicyGradients.Algos.Reinforce import Reinforce, Model, compute_discounted_rewards
 
+huber_loss = tf.keras.losses.Huber(reduction=tf.keras.losses.Reduction.SUM)
 
-def run_episode(
-    env,
-    initial_state: tf.Tensor,
-    policy: tf.keras.Model,
-    critic: tf.Keras.Model,
-    max_steps: int
-) -> List[tf.Tensor]:
-    action_probs = tf.TensorArray(tf.float32, 0, True)
-    values = tf.TensorArray(tf.float32, 0, True)
-    rewards = tf.TensorArray(tf.int32, 0, True)
-
-    initial_state_shape = initial_state.shape
-    state = initial_state
-
-    for t in tf.range(max_steps):
-        state = tf.expand_dims(state, 0)
-
-        action_logits_t = policy(state)
-
-        action = tf.random.categorical(action_logits_t, 1)[0, 0]
-        action_probs_t = tf.nn.softmax(action_logits_t)
-
-        action_probs = action_probs.write(t, action_probs_t[0, action])
-
-        value = critic(state)
-
-        values.write(t, value)
-
-        state, reward, done = tf_env_step(env, action)
-
-        state.set_shape(initial_state_shape)
-
-        rewards = rewards.write(t, reward)
-
-        if tf.cast(done, tf.bool):
-            break
-
-    action_probs = action_probs.stack()
-    values = values.stack()
-    rewards = rewards.stack()
-
-    return action_probs, values, rewards
+def _compute_policy_loss(action_probs, rewards, state_values):
+    log_action_probs = tf.math.log(action_probs)
+    advs = tf.stop_gradient(rewards - state_values)
+    return -tf.math.reduce_sum(log_action_probs * advs)
 
 
-def compute_loss(action_probs: tf.Tensor, values: tf.Tensor,
-                 returns: tf.Tensor) -> tf.Tensor:
-    advs = tf.stop_gradients(returns-values)
-    action_log_probs = tf.math.log(action_probs)
+class ReinforceBaseLine(Reinforce):
+    def __init__(self, env, actor_lr, critic_lr, policy, critic, gamma, max_episodes, max_eps_steps):
+        super().__init__(env, actor_lr, policy, gamma, max_episodes, max_eps_steps)
+        self.critic = critic
+        self.critic_optimizer = Adam(critic_lr)
 
-    loss = -tf.math.reduce_sum(action_log_probs * advs)
-    return loss
+    def _run_episode(self):
+        state = tf.constant(self.env.reset(), dtype=tf.float32)
+        rewards = tf.TensorArray(tf.float32, 0, True)
+        action_probs = tf.TensorArray(tf.float32, 0, True)
+        state_values = tf.TensorArray(tf.float32, 0, True)
 
+        state_shape = state.shape
 
-huber_loss = tf.keras.losses.Huber(reduction = tf.keras.losses.Reduction.SUM)
+        for step in tf.range(self.max_eps_steps):
+            action, action_logits_step = self.get_action(state)
+            action_probs_step = tf.nn.softmax(action_logits_step)[0, action]
+            state, reward, done = self.tf_env_step(action)
+            value = self.critic(tf.expand_dims(state, 0))
 
+            self.steps_taken += 1
 
-class Policy(tf.keras.Model):
-    def __init__(self, n_actions: int):
-        super(Policy, self).__init__(name='Policy')
-        self.fc1 = Dense(6, activation='relu')
-        self.fc2 = Dense(n_actions)
+            action_probs = action_probs.write(step, action_probs_step)
+            rewards = rewards.write(step, reward)
+            state_values = state_values.write(step, value)
 
-    def call(self, inputs: tf.Tensor):
-        x = self.fc1(inputs)
-        action_logits = self.fc2(x)
-        return action_logits
+            state.set_shape(state_shape)
 
+            if tf.cast(done, tf.bool):
+                break
+        return action_probs.stack(), rewards.stack(), state_values.stack()
 
-class Critic(tf.keras.Model):
-    def __init__(self):
-        super(Critic, self).__init__(name='Critic')
-        self.fc1 = Dense(6, activation='relu')
-        self.fc2 = Dense(1)
-
-    def call(self, inputs: tf.Tensor) -> tf.Tensor:
-        x = self.fc1(inputs)
-        return self.fc2(x)
-
-
-class ReinforceBaseline:
-    def __init__(self, n_actions, p_lr=.001, c_lr=.001):
-        self.policy = Policy(n_actions=n_actions)
-        self.critic = Critic()
-        self.p_optim = Adam(learning_rate=p_lr)
-        self.c_optim = Adam(learning_rate=c_lr)
-
-    @tf.function
-    def train_step(self, env, initial_state: tf.Tensor, gamma: float,
-                   max_steps_per_episode: int) -> tf.Tensor:
+    def train(self):
         with tf.GradientTape() as tape, tf.GradientTape() as tape2:
-            action_probs, values, rewards = run_episode(env, initial_state,
-                                                        gamma,
-                                                        max_steps_per_episode)
+            action_probs, rewards, values = self._run_episode()
+            discounted_rewards = compute_discounted_rewards(rewards, self.gamma)
+            policy_loss = _compute_policy_loss(action_probs, discounted_rewards, values)
+            critic_loss = huber_loss(values,discounted_rewards)
+        policy_grads = tape.gradient(policy_loss, self.policy.trainable_variables)
+        critic_grads = tape2.gradient(critic_loss, self.critic.trainable_variables)
+        self.policy_optimizer.apply_gradients(zip(policy_grads, self.policy.trainable_variables))
+        self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
 
-            returns = get_expected_return(rewards, gamma)
+        return rewards
 
-            action_probs, values, returns = [
-                tf.expand_dims(x, 1) for x in [action_probs, values, returns]
-            ]
 
-          actor_loss = compute_loss(action_probs, returns)
-          critic_loss = huber_loss(values,returns)
+if __name__ == '__main__':
+    env = gym.make('CartPole-v0')
+    policy = Model(env.action_space.n, hidden_units=12)
+    critic = Model(1, hidden_units=12)
 
-        actor_grads = tape.gradient(actor_loss,self.policy.trainable_variables)
-        critic_loss = tape2.gradient(critic_loss,self.critic.trainable_variables)
-        self.p_optim.apply_gradients(zip(loss,self.policy.trainable_variables))
-        self.c_optim.apply_gradients(zip(loss,self.policy.trainable_variables))
-        episode_reward = tf.math.reduce_sum(rewards)
-        return episode_reward
+    reinforce_baseline = ReinforceBaseLine(env, actor_lr=.0025, critic_lr=.02, critic=critic, policy=policy, gamma=.99,
+                                           max_episodes=10000, max_eps_steps=250)
+
+    running_rewards, episode_rewards = reinforce_baseline()
+    episodes = np.arange(len(running_rewards))
+    plt.plot(episodes, running_rewards, label='running_reward')
+    plt.plot(episodes, episode_rewards, label='episode_reward')
+    plt.legend()
+    plt.show()
+
+    reinforce_baseline.demo()
