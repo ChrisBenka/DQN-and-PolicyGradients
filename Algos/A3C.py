@@ -56,7 +56,8 @@ class Worker:
 
         self.episode_rewards = []
         self.episode_lengths = []
-        self.episode_mean_values = []
+        self.running_reward = 0
+        self.mean_rewards = []
 
         self.local_AC = ACNetwork(s_size, a_size, self.name)
 
@@ -67,6 +68,34 @@ class Worker:
 
     def _run_episode(self, max_eps_steps):
         state = tf.constant(self.env.reset(), dtype=tf.float32)
+        rewards = tf.TensorArray(tf.float32,0,True)
+        action_probs = tf.TensorArray(tf.float32,0,True)
+        values = tf.TensorArray(tf.float32,0,True)
+
+        with tf.GradientTape() as policyTape, tf.GradientTape() as criticTape:
+            for step in tf.range(max_eps_steps):
+                value = self.local_AC.critic(state[None])
+                action, action_logits_step = self.get_action(state)
+                action_probs_step = tf.nn.softmax(action_logits_step)[0, action]
+                state, reward, done = tf_env_step(action)
+
+                values.write(step,value)
+                rewards.write(step,reward)
+                action_probs.write(step,action_probs_step)
+
+                if tf.cast(done,tf.bool):
+                    episode_reward = tf.reduce_sum(rewards.stack())
+                    running_reward = .99 * self.running_reward + .01 * episode_reward
+                    self.episode_rewards.append(episode_reward)
+                    self.episode_lengths.append(step)
+                    self.mean_rewards.append(running_reward)
+                    break
+            rewards = rewards.stack()
+            for t in
+
+
+
+
         return None, None
 
     def work(self, max_steps, gamma, coord):
@@ -108,7 +137,8 @@ if __name__ == '__main__':
         workers = []
         for i in range(num_workers):
             workers.append(
-                Worker(gym.make(env_name), i, state_shape, action_shape, policy_trainer, critic_trainer, global_episodes)
+                Worker(gym.make(env_name), i, state_shape, action_shape,
+                       policy_trainer, critic_trainer, global_episodes)
             )
         coord = tf.train.Coordinator()
         worker_threads = []
